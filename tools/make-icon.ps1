@@ -1,6 +1,8 @@
 <#
 .SYNOPSIS
-    Regenerates src/KoalaDeck/Assets/KoalaDeck.ico (multi-size, PNG-compressed frames).
+    Regenerates the Koala Deck artwork:
+      src/KoalaDeck/Assets/KoalaDeck.ico          app icon (multi-size, PNG-compressed frames)
+      installer/wizard-small-{100,150,200}.bmp   installer wizard logo (koala on the dark app tile)
 .DESCRIPTION
     The koala geometry uses a 256-unit grid and matches Services/KoalaArt.cs (tray icon)
     and the KoalaLogo DrawingImage in Themes/Icons.xaml. Keep the three in sync.
@@ -8,7 +10,8 @@
     powershell -ExecutionPolicy Bypass -File tools/make-icon.ps1
 #>
 param(
-    [string]$OutFile = (Join-Path $PSScriptRoot '..\src\KoalaDeck\Assets\KoalaDeck.ico')
+    [string]$IconFile = (Join-Path $PSScriptRoot '..\src\KoalaDeck\Assets\KoalaDeck.ico'),
+    [string]$InstallerDir = (Join-Path $PSScriptRoot '..\installer')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,15 +23,8 @@ function Add-Ellipse([System.Drawing.Graphics]$g, [string]$hex, [float]$cx, [flo
     $brush.Dispose()
 }
 
-function New-KoalaPng([int]$size) {
-    $bitmap = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-    $g = [System.Drawing.Graphics]::FromImage($bitmap)
-    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-    $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
-    $g.Clear([System.Drawing.Color]::Transparent)
-    $g.ScaleTransform($size / 256.0, $size / 256.0)
-
+# Draws the koala into the 256 x 256 unit square of the current transform.
+function Add-Koala([System.Drawing.Graphics]$g) {
     Add-Ellipse $g '#8D99AE' 56 83 48 48     # ears
     Add-Ellipse $g '#8D99AE' 200 83 48 48
     Add-Ellipse $g '#E7C6D4' 60 87 27 27     # inner ears
@@ -38,7 +34,22 @@ function New-KoalaPng([int]$size) {
     Add-Ellipse $g '#1C2029' 164 131 9 9
     Add-Ellipse $g '#2A2F3B' 128 161 25 33   # nose
     Add-Ellipse $g '#4B5466' 119 147 6 9     # nose highlight
+}
 
+function New-Graphics([System.Drawing.Bitmap]$bitmap) {
+    $g = [System.Drawing.Graphics]::FromImage($bitmap)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+    return $g
+}
+
+function New-KoalaPng([int]$size) {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = New-Graphics $bitmap
+    $g.Clear([System.Drawing.Color]::Transparent)
+    $g.ScaleTransform($size / 256.0, $size / 256.0)
+    Add-Koala $g
     $g.Dispose()
     $stream = New-Object System.IO.MemoryStream
     $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
@@ -46,6 +57,37 @@ function New-KoalaPng([int]$size) {
     return , $stream.ToArray()
 }
 
+# Koala on the rounded dark tile used in the app header, on the installer's white header background.
+function Save-WizardImage([int]$size, [string]$path) {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+    $g = New-Graphics $bitmap
+    $g.Clear([System.Drawing.Color]::White)
+
+    $radius = $size * 0.24
+    $tile = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $d = 2 * $radius
+    $edge = $size - 1
+    $tile.AddArc(0, 0, $d, $d, 180, 90)
+    $tile.AddArc($edge - $d, 0, $d, $d, 270, 90)
+    $tile.AddArc($edge - $d, $edge - $d, $d, $d, 0, 90)
+    $tile.AddArc(0, $edge - $d, $d, $d, 90, 90)
+    $tile.CloseFigure()
+    $fill = New-Object System.Drawing.Drawing2D.LinearGradientBrush (New-Object System.Drawing.PointF 0, 0), (New-Object System.Drawing.PointF $size, $size), ([System.Drawing.ColorTranslator]::FromHtml('#232A3A')), ([System.Drawing.ColorTranslator]::FromHtml('#151922'))
+    $g.FillPath($fill, $tile)
+    $fill.Dispose()
+    $tile.Dispose()
+
+    $padding = $size * 0.14
+    $g.TranslateTransform($padding, $padding)
+    $g.ScaleTransform(($size - 2 * $padding) / 256.0, ($size - 2 * $padding) / 256.0)
+    Add-Koala $g
+    $g.Dispose()
+    $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Bmp)
+    $bitmap.Dispose()
+    Write-Host "Wrote $path"
+}
+
+# ---- app icon -------------------------------------------------------------------------------------------------
 $sizes = 16, 20, 24, 32, 40, 48, 64, 128, 256
 $images = foreach ($size in $sizes) { , (New-KoalaPng $size) }
 
@@ -71,7 +113,14 @@ for ($i = 0; $i -lt $sizes.Count; $i++) {
 foreach ($image in $images) { $writer.Write($image) }
 $writer.Flush()
 
-$fullPath = [System.IO.Path]::GetFullPath($OutFile)
-[System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($fullPath)) | Out-Null
-[System.IO.File]::WriteAllBytes($fullPath, $out.ToArray())
-Write-Host "Wrote $fullPath ($($out.Length) bytes, $($sizes.Count) sizes)"
+$iconPath = [System.IO.Path]::GetFullPath($IconFile)
+[System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($iconPath)) | Out-Null
+[System.IO.File]::WriteAllBytes($iconPath, $out.ToArray())
+Write-Host "Wrote $iconPath ($($out.Length) bytes, $($sizes.Count) sizes)"
+
+# ---- installer wizard logo (100 / 150 / 200 % DPI) ---------------------------------------------------------------
+$installerPath = [System.IO.Path]::GetFullPath($InstallerDir)
+[System.IO.Directory]::CreateDirectory($installerPath) | Out-Null
+foreach ($scale in @(@{ Size = 55; Name = '100' }, @{ Size = 83; Name = '150' }, @{ Size = 110; Name = '200' })) {
+    Save-WizardImage $scale.Size (Join-Path $installerPath "wizard-small-$($scale.Name).bmp")
+}

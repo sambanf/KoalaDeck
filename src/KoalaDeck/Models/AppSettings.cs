@@ -13,11 +13,11 @@ public sealed class AppSettings
 
     public int BaudRate { get; set; } = 115200;
 
-    /// <summary>Channel 2 group ("Chat").</summary>
-    public ChannelSettings Channel2 { get; set; } = new() { Apps = ["Discord"] };
+    /// <summary>Channel 2 group ("Chat"): Discord, playing on the Windows default communications device.</summary>
+    public ChannelSettings Channel2 { get; set; } = new() { Apps = ["Discord"], OutputMode = ChannelOutputMode.Communications };
 
-    /// <summary>Channel 3 group ("Music").</summary>
-    public ChannelSettings Channel3 { get; set; } = new() { Apps = ["Spotify"] };
+    /// <summary>Channel 3 group ("Music"): empty until the user adds apps.</summary>
+    public ChannelSettings Channel3 { get; set; } = new() { OutputMode = ChannelOutputMode.SameAsMaster };
 
     /// <summary>Last known exe path per process name, so group members keep their icon while not running.</summary>
     public Dictionary<string, string> AppPaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -74,6 +74,18 @@ public sealed class AppSettings
             Channel3Target = null;
         }
 
+        // Settings from before output modes: Chat follows the communications device, Music the master output,
+        // unless a specific device was chosen.
+        Channel2.OutputMode ??= Channel2.OutputDeviceId is null ? ChannelOutputMode.Communications : ChannelOutputMode.Device;
+        Channel3.OutputMode ??= Channel3.OutputDeviceId is null ? ChannelOutputMode.SameAsMaster : ChannelOutputMode.Device;
+        foreach (ChannelSettings channel in new[] { Channel2, Channel3 })
+        {
+            if (channel.OutputMode == ChannelOutputMode.Device && channel.OutputDeviceId is null)
+            {
+                channel.OutputMode = ChannelOutputMode.SameAsMaster;
+            }
+        }
+
         Channel2.Apps = AppNames.Clean(Channel2.Apps).ToList();
         // An app belongs to one group only; channel 2 wins on conflicts.
         Channel3.Apps = AppNames.Clean(Channel3.Apps)
@@ -82,13 +94,30 @@ public sealed class AppSettings
     }
 }
 
+/// <summary>Where an app channel plays.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter<ChannelOutputMode>))]
+public enum ChannelOutputMode
+{
+    /// <summary>The Windows default output, like the master channel. The channel knob sets the apps' volume.</summary>
+    SameAsMaster,
+
+    /// <summary>The Windows default communications output (headset for calls). Follows changes to that default.</summary>
+    Communications,
+
+    /// <summary>A specific device (<see cref="ChannelSettings.OutputDeviceId"/>).</summary>
+    Device,
+}
+
 /// <summary>An app group bound to one deck channel.</summary>
 public sealed class ChannelSettings
 {
     /// <summary>Process names (without ".exe") whose volume this channel controls.</summary>
     public List<string> Apps { get; set; } = new();
 
-    /// <summary>Output device the apps are routed to (Core Audio endpoint ID); null = follow the Windows default.</summary>
+    /// <summary>Null only in settings files written before output modes existed (see <see cref="AppSettings.Normalize"/>).</summary>
+    public ChannelOutputMode? OutputMode { get; set; }
+
+    /// <summary>Endpoint ID for <see cref="ChannelOutputMode.Device"/>; ignored by the other modes.</summary>
     public string? OutputDeviceId { get; set; }
 
     /// <summary>Friendly name of <see cref="OutputDeviceId"/>, shown while that device is unplugged.</summary>

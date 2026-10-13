@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-    Builds the portable exe and the installer:
-      artifacts\publish\win-x64\KoalaDeck.exe          (self-contained, single file)
-      artifacts\installer\KoalaDeck-Setup-<version>.exe
+    Builds both distributables:
+      artifacts\publish\portable\KoalaDeck.exe          portable: one self-contained exe, runs from anywhere
+      artifacts\installer\KoalaDeck-Setup-<version>.exe  installer: installs the app folder per-user
 .DESCRIPTION
     The version comes from <Version> in src\KoalaDeck\KoalaDeck.csproj.
     Requires the .NET 10 SDK and Inno Setup 6 (winget install JRSoftware.InnoSetup).
@@ -21,8 +21,12 @@ $version = ([xml](Get-Content $project)).Project.PropertyGroup.Version | Where-O
 Write-Host "Koala Deck $version" -ForegroundColor Cyan
 
 if (-not $SkipPublish) {
-    dotnet publish $project -p:PublishProfile=win-x64 -nologo
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    foreach ($profile in 'portable', 'installer') {
+        # Start from an empty folder so files removed from the app never linger in the package.
+        Remove-Item (Join-Path $root "artifacts\publish\$profile") -Recurse -Force -ErrorAction SilentlyContinue
+        dotnet publish $project -p:PublishProfile=$profile -nologo
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
 }
 
 $iscc = @(
@@ -37,5 +41,5 @@ if (-not $iscc) {
 & $iscc "/DAppVersion=$version" (Join-Path $PSScriptRoot 'KoalaDeck.iss')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Get-ChildItem (Join-Path $root 'artifacts\installer') -Filter "KoalaDeck-Setup-$version.exe" |
-    ForEach-Object { Write-Host ("Installer: {0} ({1:N1} MB)" -f $_.FullName, ($_.Length / 1MB)) -ForegroundColor Green }
+Get-Item (Join-Path $root 'artifacts\publish\portable\KoalaDeck.exe'), (Join-Path $root "artifacts\installer\KoalaDeck-Setup-$version.exe") |
+    ForEach-Object { Write-Host ("{0} ({1:N1} MB)" -f $_.FullName, ($_.Length / 1MB)) -ForegroundColor Green }

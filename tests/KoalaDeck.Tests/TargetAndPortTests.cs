@@ -47,14 +47,39 @@ public class TargetAndPortTests
     }
 
     [Fact]
-    public void New_install_defaults_to_discord_and_spotify()
+    public void New_install_puts_discord_on_the_communications_device_and_leaves_music_empty()
     {
         AppSettings settings = JsonSerializer.Deserialize<AppSettings>("{}")!;
         settings.Normalize();
 
         Assert.Equal(new[] { "Discord" }, settings.Channel2.Apps);
-        Assert.Equal(new[] { "Spotify" }, settings.Channel3.Apps);
-        Assert.Null(settings.Channel2.OutputDeviceId);
+        Assert.Equal(ChannelOutputMode.Communications, settings.Channel2.OutputMode);
+        Assert.Empty(settings.Channel3.Apps);
+        Assert.Equal(ChannelOutputMode.SameAsMaster, settings.Channel3.OutputMode);
+    }
+
+    [Fact]
+    public void Settings_without_output_mode_are_migrated()
+    {
+        const string json = """
+            {
+              "Channel2": { "Apps": ["Discord"], "OutputDeviceId": null },
+              "Channel3": { "Apps": ["Spotify"], "OutputDeviceId": "{0.0.0.00000000}.{headset}", "OutputDeviceName": "Headset" }
+            }
+            """;
+        AppSettings settings = JsonSerializer.Deserialize<AppSettings>(json)!;
+        settings.Normalize();
+
+        Assert.Equal(ChannelOutputMode.Communications, settings.Channel2.OutputMode);
+        Assert.Equal(ChannelOutputMode.Device, settings.Channel3.OutputMode);
+        Assert.Equal("{0.0.0.00000000}.{headset}", settings.Channel3.OutputDeviceId);
+    }
+
+    [Fact]
+    public void Output_mode_is_saved_as_text()
+    {
+        string json = JsonSerializer.Serialize(new AppSettings());
+        Assert.Contains("\"OutputMode\":\"Communications\"", json);
     }
 
     [Fact]

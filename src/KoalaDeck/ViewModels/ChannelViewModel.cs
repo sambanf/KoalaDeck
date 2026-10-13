@@ -24,6 +24,7 @@ public sealed class ChannelViewModel : ObservableObject
     private bool _isAvailable;
     private bool _isFlashing;
     private bool _isDropTarget;
+    private string _volumeCaption;
 
     public ChannelViewModel(
         MainViewModel owner,
@@ -39,6 +40,7 @@ public sealed class ChannelViewModel : ObservableObject
         Index = index;
         Title = title;
         IsMaster = isMaster;
+        _volumeCaption = isMaster ? "VOLUME" : "APP VOLUME";
         Icon = icon;
         RunningApps = runningApps;
         InstalledApps = installedApps;
@@ -176,6 +178,13 @@ public sealed class ChannelViewModel : ObservableObject
     }
 
     /// <summary>True while an app is dragged over this card.</summary>
+    /// <summary>Under the gauge: "DEVICE VOLUME" when the knob sets an output device, "APP VOLUME" when it sets the apps.</summary>
+    public string VolumeCaption
+    {
+        get => _volumeCaption;
+        private set => SetProperty(ref _volumeCaption, value);
+    }
+
     public bool IsDropTarget
     {
         get => _isDropTarget;
@@ -193,7 +202,7 @@ public sealed class ChannelViewModel : ObservableObject
     }
 
     /// <summary>Replaces the dropdown entries without the rebuild being mistaken for a user choice.</summary>
-    internal void SetOutputOptions(IEnumerable<OutputDeviceItem> options, string? selectedId)
+    internal void SetOutputOptions(IEnumerable<OutputDeviceItem> options, Func<OutputDeviceItem, bool> isSelected)
     {
         _updatingOutputs = true;
         try
@@ -204,7 +213,7 @@ public sealed class ChannelViewModel : ObservableObject
                 OutputOptions.Add(option);
             }
 
-            SelectedOutput = OutputOptions.FirstOrDefault(o => o.Id == selectedId) ?? OutputOptions.FirstOrDefault();
+            SelectedOutput = OutputOptions.FirstOrDefault(isSelected) ?? OutputOptions.FirstOrDefault();
         }
         finally
         {
@@ -216,6 +225,10 @@ public sealed class ChannelViewModel : ObservableObject
     {
         IsAvailable = snapshot.IsAvailable;
         IsMuted = snapshot.IsMuted;
+        if (!IsMaster)
+        {
+            VolumeCaption = snapshot.ControlsDevice ? "DEVICE VOLUME" : "APP VOLUME";
+        }
 
         if (!IsUserAdjusting)
         {

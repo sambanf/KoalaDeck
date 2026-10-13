@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using KoalaDeck.Models;
 
 namespace KoalaDeck.Services;
@@ -46,6 +47,14 @@ public sealed class DeckController : IDisposable
         catch (ObjectDisposedException)
         {
             return null; // shutting down
+        }
+        catch (COMException ex)
+        {
+            // Windows' audio stack refused even after a device refresh and retry (e.g. 0x8007001F: the output device
+            // was unplugged, went to sleep, is switching, or its driver hung). Not an app bug: report it plainly.
+            Logger.Warn($"Command {command}: audio device not responding (0x{ex.HResult:X8} {ex.Message.Trim()})");
+            Raise(source, command, $"Audio device not responding (0x{ex.HResult:X8}) — is it unplugged or asleep?", ActivityKind.Warning);
+            return null;
         }
         catch (Exception ex)
         {

@@ -33,7 +33,9 @@ public sealed class AudioService : IDisposable
 
     // ---- Worker-thread-only state ----
     private readonly string[][] _channelApps = new string[ChannelCount + 1][];
-    private readonly string?[] _channelOutputs = new string?[ChannelCount + 1];
+    private readonly ChannelOutputMode[] _channelModes = new ChannelOutputMode[ChannelCount + 1];
+    private readonly string?[] _channelDeviceIds = new string?[ChannelCount + 1];
+    private readonly string?[] _routedOutputs = new string?[ChannelCount + 1]; // device the apps are routed to now
     private readonly Dictionary<string, MMDevice> _renderDevices = new(StringComparer.Ordinal);
     private readonly Dictionary<uint, ProcessIdentity> _processes = new();
     private readonly Dictionary<uint, string> _routedPids = new();
@@ -41,11 +43,13 @@ public sealed class AudioService : IDisposable
     private MMDevice? _output;
     private MMDevice? _input;
     private MMDevice? _inputComms;
+    private MMDevice? _outputComms;
     private AudioPolicyConfig? _policy;
     private bool _policyChecked;
     private List<SessionEntry> _sessions = new();
     private DateTime _lastRefreshUtc = DateTime.MinValue;
     private bool _topologyDirty = true;
+    private bool _reopenDevices;
     private string? _lastRefreshError;
 
     public AudioService()
@@ -66,12 +70,12 @@ public sealed class AudioService : IDisposable
     // ------------------------------------------------------------------ public API
 
     /// <summary>
-    /// Sets the apps of an app channel (2 or 3) and its output device (null = follow the Windows default).
-    /// Apps that leave a routed group go back to the default device; apps that join are routed.
-    /// Returns a warning when Windows refused to route some apps, otherwise null.
+    /// Sets the apps of an app channel (2 or 3) and where they play (<paramref name="deviceId"/> is used by
+    /// <see cref="ChannelOutputMode.Device"/> only). Apps that leave a routed group go back to the default device;
+    /// apps that join are routed. Returns a warning when Windows refused to route some apps, otherwise null.
     /// </summary>
-    public Task<string?> ConfigureChannelAsync(int channel, IReadOnlyCollection<string> apps, string? outputDeviceId) =>
-        InvokeAsync(() => ConfigureChannel(channel, AppNames.Clean(apps).ToArray(), outputDeviceId));
+    public Task<string?> ConfigureChannelAsync(int channel, IReadOnlyCollection<string> apps, ChannelOutputMode mode, string? deviceId) =>
+        InvokeAsync(() => ConfigureChannel(channel, AppNames.Clean(apps).ToArray(), mode, deviceId));
 
     /// <summary>Makes a device the Windows default output (master channel).</summary>
     public Task<AudioActionResult> SetDefaultOutputAsync(string deviceId) =>
@@ -178,8 +182,11 @@ public sealed class AudioService : IDisposable
         }
         catch (Exception ex) when (IsAudioFailure(ex))
         {
-            // Typical causes: device unplugged, default device switched, app closed its session.
-            Logger.Warn($"Audio call failed ({ex.Message}); refreshing devices and retrying once");
+            // Typical causes: device unplugged, default device switched, app closed its session, or a device
+            // interface that went bad (sleep/resume, HDMI monitor power cycle, driver reset) while its ID stayed the same.
+            // Re-open every device rather than reusing the cached interfaces, then retry once.
+            Logger.Warn($"Audio call failed ({ex.Message.Trim()}); re-opening audio devices and retrying once");
+            _reopenDevices = true;
             _topologyDirty = true;
             TryRefreshTopology();
             return func();
@@ -221,12 +228,20 @@ public sealed class AudioService : IDisposable
             IsAppRoutingSupported = _policy is not null;
         }
 
+        if (_reopenDevices)
+        {
+            _reopenDevices = false;
+            ReleaseDevices(); // everything below is activated afresh
+        }
+
         _output = ReplaceDefault(_output, DataFlow.Render, Role.Multimedia);
         _input = ReplaceDefault(_input, DataFlow.Capture, Role.Console);
         _inputComms = ReplaceDefault(_inputComms, DataFlow.Capture, Role.Communications);
+        _outputComms = ReplaceDefault(_outputComms, DataFlow.Render, Role.Communications);
 
         RefreshRenderDevices();
         RefreshSessions();
+        ReapplyMovedTargets();
         RouteNewSessions();
 
         _lastRefreshUtc = DateTime.UtcNow;
@@ -255,6 +270,18 @@ public sealed class AudioService : IDisposable
         }
 
         SafeDispose(current);
+        if (fresh is not null)
+        {
+            string kind = (flow, role) switch
+            {
+                (DataFlow.Render, Role.Communications) => "communications output",
+                (DataFlow.Render, _) => "output",
+                (DataFlow.Capture, Role.Communications) => "communications microphone",
+                _ => "microphone",
+            };
+            Logger.Info($"Default {kind}: {SafeFriendlyName(fresh)}");
+        }
+
         return fresh;
     }
 
@@ -433,7 +460,7 @@ public sealed class AudioService : IDisposable
 
     // ------------------------------------------------------------------ groups & output routing (worker thread)
 
-    private string? ConfigureChannel(int channel, string[] apps, string? outputDeviceId)
+    private string? ConfigureChannel(int channel, string[] apps, ChannelOutputMode mode, string? deviceId)
     {
         if (channel is <= MasterChannel or > ChannelCount)
         {
@@ -441,37 +468,63 @@ public sealed class AudioService : IDisposable
         }
 
         string[] previousApps = _channelApps[channel];
-        string? previousOutput = _channelOutputs[channel];
         _channelApps[channel] = apps;
-        _channelOutputs[channel] = outputDeviceId;
+        _channelModes[channel] = mode;
+        _channelDeviceIds[channel] = deviceId;
+        return ApplyRouting(channel, previousApps);
+    }
 
-        if (previousOutput is null && outputDeviceId is null)
+    /// <summary>
+    /// The device a channel's apps must be routed to, or null when they simply follow the Windows default
+    /// ("Same as Master", or a communications device that is the default device anyway).
+    /// </summary>
+    private string? RoutingTarget(int channel)
+    {
+        string? masterId = _output is null ? null : SafeId(_output);
+        return _channelModes[channel] switch
+        {
+            ChannelOutputMode.Device => _channelDeviceIds[channel],
+            ChannelOutputMode.Communications when _outputComms is not null && SafeId(_outputComms) is { } id && id != masterId => id,
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// Brings the routing of a channel's apps in line with its output: apps that left the group (or all apps, when the
+    /// channel goes back to the default) return to the default device; the others are routed to the target.
+    /// Returns a warning when Windows refused, otherwise null.
+    /// </summary>
+    private string? ApplyRouting(int channel, string[] previousApps)
+    {
+        string[] apps = _channelApps[channel];
+        string? previous = _routedOutputs[channel];
+        string? target = _policy is null ? null : RoutingTarget(channel);
+        _routedOutputs[channel] = target;
+
+        if (_policy is null)
+        {
+            return RoutingTarget(channel) is null ? null : "This Windows version cannot send individual apps to another output";
+        }
+
+        if (previous is null && target is null)
         {
             return null; // nothing routed before or now
         }
 
-        if (_policy is null)
-        {
-            return "This Windows version cannot send individual apps to another output";
-        }
-
-        // Apps that left a routed group, or every app when the group goes back to "default", return to the default device.
-        IEnumerable<string> release = outputDeviceId is null
-            ? previousApps
-            : previousApps.Except(apps, StringComparer.OrdinalIgnoreCase);
+        IEnumerable<string> release = target is null ? previousApps : previousApps.Except(apps, StringComparer.OrdinalIgnoreCase);
         foreach (string app in release)
         {
             RouteApp(app, null);
         }
 
         var refused = new List<string>();
-        if (outputDeviceId is not null)
+        if (target is not null)
         {
-            bool outputChanged = !string.Equals(previousOutput, outputDeviceId, StringComparison.Ordinal);
-            IEnumerable<string> route = outputChanged ? apps : apps.Except(previousApps, StringComparer.OrdinalIgnoreCase);
+            bool targetChanged = !string.Equals(previous, target, StringComparison.Ordinal);
+            IEnumerable<string> route = targetChanged ? apps : apps.Except(previousApps, StringComparer.OrdinalIgnoreCase);
             foreach (string app in route)
             {
-                if (!RouteApp(app, outputDeviceId))
+                if (!RouteApp(app, target))
                 {
                     refused.Add(app);
                 }
@@ -484,11 +537,45 @@ public sealed class AudioService : IDisposable
             return null;
         }
 
-        string device = DeviceName(outputDeviceId!);
+        string device = DeviceName(target!);
         string hint = device.Contains("Remote Audio", StringComparison.OrdinalIgnoreCase)
             ? " (Remote Desktop audio cannot be a per-app output)"
             : string.Empty;
         return $"Windows refused to send {string.Join(", ", refused)} to {device}{hint}";
+    }
+
+    /// <summary>Re-routes channels whose target moved, e.g. the user picked another default communications device.</summary>
+    private void ReapplyMovedTargets()
+    {
+        for (int channel = 2; channel <= ChannelCount; channel++)
+        {
+            if (_policy is not null && !string.Equals(RoutingTarget(channel), _routedOutputs[channel], StringComparison.Ordinal))
+            {
+                Logger.Info($"Channel {channel} output moved; re-routing its apps");
+                if (ApplyRouting(channel, _channelApps[channel]) is { } warning)
+                {
+                    Logger.Warn(warning);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The device whose volume a channel's knob controls: the default output for the master channel, the channel's own
+    /// output when its apps play somewhere else than the master; otherwise null and the knob sets the apps' volume.
+    /// </summary>
+    private MMDevice? ControlledDevice(int channel)
+    {
+        if (channel == MasterChannel)
+        {
+            return _output;
+        }
+
+        string? target = _routedOutputs[channel];
+        return target is not null && target != (_output is null ? null : SafeId(_output))
+            && _renderDevices.TryGetValue(target, out MMDevice? device)
+            ? device
+            : null;
     }
 
     /// <summary>
@@ -555,7 +642,7 @@ public sealed class AudioService : IDisposable
 
         for (int channel = 2; channel <= ChannelCount; channel++)
         {
-            string? deviceId = _channelOutputs[channel];
+            string? deviceId = _routedOutputs[channel];
             if (deviceId is null)
             {
                 continue;
@@ -595,12 +682,13 @@ public sealed class AudioService : IDisposable
     private IReadOnlyList<OutputDeviceInfo> GetOutputDevices()
     {
         string? defaultId = _output is null ? null : SafeId(_output);
+        string? communicationsId = _outputComms is null ? null : SafeId(_outputComms);
         var devices = new List<OutputDeviceInfo>();
         foreach ((string id, MMDevice device) in _renderDevices)
         {
             try
             {
-                devices.Add(new OutputDeviceInfo(id, device.FriendlyName, id == defaultId, IsHeadphones(device)));
+                devices.Add(new OutputDeviceInfo(id, device.FriendlyName, id == defaultId, IsHeadphones(device), id == communicationsId));
             }
             catch (Exception ex) when (IsAudioFailure(ex))
             {
@@ -650,16 +738,14 @@ public sealed class AudioService : IDisposable
 
     // ------------------------------------------------------------------ actions (worker thread)
 
+    // Channels that play on their own device (and the master channel) change that device's volume;
+    // the others change the volume of their apps.
+
     private AudioActionResult ChangeVolume(int channel, float delta)
     {
-        if (channel == MasterChannel)
+        if (TryGetDevice(channel, out MMDevice? device, out string deviceLabel, out AudioActionResult? noDevice))
         {
-            if (_output is null)
-            {
-                return AudioActionResult.Fail("Master", "No playback device");
-            }
-
-            AudioEndpointVolume endpoint = _output.AudioEndpointVolume;
+            AudioEndpointVolume endpoint = device.AudioEndpointVolume;
             float next = Clamp(endpoint.MasterVolumeLevelScalar + delta);
             endpoint.MasterVolumeLevelScalar = next;
             if (delta > 0 && endpoint.Mute)
@@ -667,7 +753,12 @@ public sealed class AudioService : IDisposable
                 endpoint.Mute = false; // same as the Windows volume keys
             }
 
-            return Success("Master", next, endpoint.Mute);
+            return Success(deviceLabel, next, endpoint.Mute);
+        }
+
+        if (noDevice is not null)
+        {
+            return noDevice;
         }
 
         if (!TryGetSessions(channel, out string label, out List<SessionEntry> sessions, out AudioActionResult? failure))
@@ -694,15 +785,15 @@ public sealed class AudioService : IDisposable
     private AudioActionResult SetVolume(int channel, float value)
     {
         float target = Clamp(value);
-        if (channel == MasterChannel)
+        if (TryGetDevice(channel, out MMDevice? device, out string deviceLabel, out AudioActionResult? noDevice))
         {
-            if (_output is null)
-            {
-                return AudioActionResult.Fail("Master", "No playback device");
-            }
+            device.AudioEndpointVolume.MasterVolumeLevelScalar = target;
+            return Success(deviceLabel, target, device.AudioEndpointVolume.Mute);
+        }
 
-            _output.AudioEndpointVolume.MasterVolumeLevelScalar = target;
-            return Success("Master", target, _output.AudioEndpointVolume.Mute);
+        if (noDevice is not null)
+        {
+            return noDevice;
         }
 
         if (!TryGetSessions(channel, out string label, out List<SessionEntry> sessions, out AudioActionResult? failure))
@@ -716,16 +807,16 @@ public sealed class AudioService : IDisposable
 
     private AudioActionResult ToggleMute(int channel)
     {
-        if (channel == MasterChannel)
+        if (TryGetDevice(channel, out MMDevice? device, out string deviceLabel, out AudioActionResult? noDevice))
         {
-            if (_output is null)
-            {
-                return AudioActionResult.Fail("Master", "No playback device");
-            }
-
-            AudioEndpointVolume endpoint = _output.AudioEndpointVolume;
+            AudioEndpointVolume endpoint = device.AudioEndpointVolume;
             endpoint.Mute = !endpoint.Mute;
-            return Success("Master", endpoint.MasterVolumeLevelScalar, endpoint.Mute);
+            return Success(deviceLabel, endpoint.MasterVolumeLevelScalar, endpoint.Mute);
+        }
+
+        if (noDevice is not null)
+        {
+            return noDevice;
         }
 
         if (!TryGetSessions(channel, out string label, out List<SessionEntry> sessions, out AudioActionResult? failure))
@@ -767,6 +858,41 @@ public sealed class AudioService : IDisposable
 
         return new AudioActionResult(true, "Microphone", devices[0].AudioEndpointVolume.MasterVolumeLevelScalar, next,
             next ? "Microphone muted" : "Microphone live");
+    }
+
+    /// <summary>
+    /// True when the channel's knob controls a device (see <see cref="ControlledDevice"/>). For the master channel
+    /// without any output device, returns false with <paramref name="failure"/> set; app channels then fall back to apps.
+    /// </summary>
+    private bool TryGetDevice(int channel, [NotNullWhen(true)] out MMDevice? device, out string label, out AudioActionResult? failure)
+    {
+        device = ControlledDevice(channel);
+        failure = null;
+        if (device is null)
+        {
+            label = "Master";
+            if (channel == MasterChannel)
+            {
+                failure = AudioActionResult.Fail(label, "No playback device");
+            }
+
+            return false;
+        }
+
+        label = channel == MasterChannel ? "Master" : SafeFriendlyName(device);
+        return true;
+    }
+
+    private static string SafeFriendlyName(MMDevice device)
+    {
+        try
+        {
+            return device.FriendlyName;
+        }
+        catch (Exception ex) when (IsAudioFailure(ex))
+        {
+            return "Output device";
+        }
     }
 
     private bool TryGetSessions(int channel, out string label, out List<SessionEntry> sessions, [NotNullWhen(false)] out AudioActionResult? failure)
@@ -820,28 +946,32 @@ public sealed class AudioService : IDisposable
         return new AudioSnapshot(channels, SnapshotMicrophone(), SnapshotApps());
     }
 
-    private ChannelSnapshot SnapshotMaster()
-    {
-        if (_output is null)
-        {
-            return ChannelSnapshot.Unavailable(MasterChannel, "No playback device");
-        }
+    private ChannelSnapshot SnapshotMaster() =>
+        _output is null ? ChannelSnapshot.Unavailable(MasterChannel, "No playback device") : SnapshotDevice(MasterChannel, _output);
 
+    /// <summary>State of a device whose volume the channel controls (peak = everything playing on it).</summary>
+    private ChannelSnapshot SnapshotDevice(int channel, MMDevice device)
+    {
         try
         {
-            AudioEndpointVolume endpoint = _output.AudioEndpointVolume;
-            return new ChannelSnapshot(MasterChannel, true, endpoint.MasterVolumeLevelScalar, endpoint.Mute,
-                _output.AudioMeterInformation.MasterPeakValue, 1, _output.FriendlyName);
+            AudioEndpointVolume endpoint = device.AudioEndpointVolume;
+            return new ChannelSnapshot(channel, true, endpoint.MasterVolumeLevelScalar, endpoint.Mute,
+                device.AudioMeterInformation.MasterPeakValue, 1, device.FriendlyName, ControlsDevice: true);
         }
         catch (Exception ex) when (IsAudioFailure(ex))
         {
             _topologyDirty = true;
-            return ChannelSnapshot.Unavailable(MasterChannel, "Playback device unavailable");
+            return ChannelSnapshot.Unavailable(channel, "Playback device unavailable");
         }
     }
 
     private ChannelSnapshot SnapshotChannel(int channel)
     {
+        if (ControlledDevice(channel) is { } device)
+        {
+            return SnapshotDevice(channel, device);
+        }
+
         List<SessionEntry> sessions = SessionsFor(channel, refreshIfMissing: false);
         if (sessions.Count == 0)
         {
@@ -986,7 +1116,8 @@ public sealed class AudioService : IDisposable
         }
     }
 
-    private void ReleaseAll()
+    /// <summary>Drops every cached device and session wrapper (the enumerator and routing factory stay).</summary>
+    private void ReleaseDevices()
     {
         foreach (SessionEntry session in _sessions)
         {
@@ -1003,9 +1134,15 @@ public sealed class AudioService : IDisposable
         SafeDispose(_output);
         SafeDispose(_input);
         SafeDispose(_inputComms);
+        SafeDispose(_outputComms);
+        _output = _input = _inputComms = _outputComms = null;
+    }
+
+    private void ReleaseAll()
+    {
+        ReleaseDevices();
         SafeDispose(_enumerator);
         _policy?.Dispose();
-        _output = _input = _inputComms = null;
         _enumerator = null;
         _policy = null;
     }

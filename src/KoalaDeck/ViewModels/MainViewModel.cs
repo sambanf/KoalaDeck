@@ -333,17 +333,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
 
         ChannelSettings group = _settings.Current.ForChannel(channel.Index)!;
-        if (output.IsMissing || group.OutputDeviceId == output.Id)
+        if (output.IsMissing || (group.OutputMode == output.Mode && group.OutputDeviceId == output.Id))
         {
             return;
         }
 
+        group.OutputMode = output.Mode;
         group.OutputDeviceId = output.Id;
         group.OutputDeviceName = output.Id is null ? null : output.Name;
         _settings.SaveDelayed();
         PushChannelConfig(channel.Index);
         AddActivity(new DeckActivity(DateTime.Now, ActivitySource.Dashboard, "OUTPUT",
-            $"{channel.Title} → {(output.Id is null ? "Windows default" : output.Name)}", ActivityKind.Info, channel.Index));
+            $"{channel.Title} → {output.Name}", ActivityKind.Info, channel.Index));
     }
 
     /// <summary>Sends a group to the audio engine (queued in call order) and reports routing refusals in the activity log.</summary>
@@ -352,7 +353,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         ChannelSettings group = _settings.Current.ForChannel(channel)!;
         try
         {
-            string? warning = await _audio.ConfigureChannelAsync(channel, group.Apps.ToArray(), group.OutputDeviceId);
+            string? warning = await _audio.ConfigureChannelAsync(
+                channel, group.Apps.ToArray(), group.OutputMode ?? ChannelOutputMode.SameAsMaster, group.OutputDeviceId);
             if (warning is not null)
             {
                 AddSystemActivity("OUTPUT", warning, ActivityKind.Warning);
@@ -396,8 +398,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         try
         {
             IReadOnlyList<OutputDeviceInfo> devices = await _audio.GetOutputDevicesAsync();
-            var signature = string.Join("|", devices.Select(d => $"{d.Id}/{d.Name}/{d.IsDefault}"))
-                + $"|{_settings.Current.Channel2.OutputDeviceId}|{_settings.Current.Channel3.OutputDeviceId}";
+            AppSettings s = _settings.Current;
+            var signature = string.Join("|", devices.Select(d => $"{d.Id}/{d.Name}/{d.IsDefault}/{d.IsCommunications}"))
+                + $"|{s.Channel2.OutputMode}/{s.Channel2.OutputDeviceId}|{s.Channel3.OutputMode}/{s.Channel3.OutputDeviceId}";
             if (signature == _deviceSignature)
             {
                 return;
@@ -405,26 +408,34 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             _deviceSignature = signature;
             OutputDeviceInfo? defaultDevice = devices.FirstOrDefault(d => d.IsDefault);
+            OutputDeviceInfo? communications = devices.FirstOrDefault(d => d.IsCommunications);
             List<OutputDeviceItem> deviceItems = devices
-                .Select(d => new OutputDeviceItem(d.Id, d.Name, d.IsDefault ? "Windows default" : string.Empty, d.IsHeadphones, false))
+                .Select(d => new OutputDeviceItem(ChannelOutputMode.Device, d.Id, d.Name, string.Empty, d.IsHeadphones, false))
                 .ToList();
 
-            Channels[0].SetOutputOptions(deviceItems, defaultDevice?.Id);
+            Channels[0].SetOutputOptions(
+                deviceItems.Select(d => d.Id == defaultDevice?.Id ? d with { Detail = "Windows default" } : d),
+                item => item.Id == defaultDevice?.Id);
 
             for (int index = 2; index <= AudioService.ChannelCount; index++)
             {
-                ChannelSettings group = _settings.Current.ForChannel(index)!;
+                ChannelSettings group = s.ForChannel(index)!;
                 var options = new List<OutputDeviceItem>
                 {
-                    new(null, "Same as Master", defaultDevice?.Name ?? "Windows default", defaultDevice?.IsHeadphones == true, false),
+                    new(ChannelOutputMode.SameAsMaster, null, "Same as Master", defaultDevice?.Name ?? "Windows default",
+                        defaultDevice?.IsHeadphones == true, false),
+                    new(ChannelOutputMode.Communications, null, "Communications device", communications?.Name ?? "Windows default",
+                        communications?.IsHeadphones == true, false),
                 };
-                options.AddRange(deviceItems.Select(d => d with { Detail = string.Empty }));
-                if (group.OutputDeviceId is not null && devices.All(d => d.Id != group.OutputDeviceId))
+                options.AddRange(deviceItems);
+                if (group.OutputMode == ChannelOutputMode.Device && devices.All(d => d.Id != group.OutputDeviceId))
                 {
-                    options.Add(new OutputDeviceItem(group.OutputDeviceId, group.OutputDeviceName ?? "Saved device", "Unplugged", false, true));
+                    options.Add(new OutputDeviceItem(ChannelOutputMode.Device, group.OutputDeviceId,
+                        group.OutputDeviceName ?? "Saved device", "Unplugged", false, true));
                 }
 
-                Channels[index - 1].SetOutputOptions(options, group.OutputDeviceId);
+                Channels[index - 1].SetOutputOptions(options, item => item.Mode == group.OutputMode
+                    && (item.Mode != ChannelOutputMode.Device || item.Id == group.OutputDeviceId));
                 Channels[index - 1].CanChooseOutput = _audio.IsAppRoutingSupported;
             }
         }
@@ -899,6 +910,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
         catch (ObjectDisposedException)
         {
+        }
+        catch (System.Runtime.InteropServices.COMException ex)
+        {
+            Logger.Warn($"{what}: audio device not responding (0x{ex.HResult:X8})");
         }
         catch (Exception ex)
         {

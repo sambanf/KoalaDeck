@@ -231,7 +231,7 @@ public sealed partial class SerialService : IDisposable
                 if (removed || faulted)
                 {
                     string reason = removed ? $"{ConnectedPort} was unplugged" : $"{ConnectedPort}: {_faultReason}";
-                    Logger.Warn($"Serial connection lost – {reason}");
+                    Logger.Warn($"Serial connection lost: {reason}");
                     ClosePort();
                     SetState(KeepConnected ? SerialConnectionState.Searching : SerialConnectionState.Disconnected,
                         TargetPort, $"Connection lost – {reason}", isProblem: true);
@@ -347,7 +347,7 @@ public sealed partial class SerialService : IDisposable
             if (message != _lastOpenError)
             {
                 _lastOpenError = message;
-                Logger.Warn($"Serial open failed – {message}");
+                Logger.Warn($"Serial open failed: {message}");
             }
 
             SetState(KeepConnected ? SerialConnectionState.Searching : SerialConnectionState.Disconnected, portName, message, isProblem: true);

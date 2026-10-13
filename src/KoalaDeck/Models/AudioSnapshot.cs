@@ -1,7 +1,9 @@
 namespace KoalaDeck.Models;
 
 /// <summary>Live state of one deck channel. Volume and Peak are 0..1.</summary>
-public sealed record ChannelSnapshot(int Channel, bool IsAvailable, float Volume, bool IsMuted, float Peak, int SessionCount, string Detail)
+/// <param name="ControlsDevice">The channel's volume is an output device's volume (otherwise its apps' volume).</param>
+public sealed record ChannelSnapshot(
+    int Channel, bool IsAvailable, float Volume, bool IsMuted, float Peak, int SessionCount, string Detail, bool ControlsDevice = false)
 {
     public static ChannelSnapshot Unavailable(int channel, string detail) => new(channel, false, 0, false, 0, 0, detail);
 }
@@ -21,7 +23,8 @@ public sealed record AudioSnapshot(IReadOnlyList<ChannelSnapshot> Channels, MicS
 /// <param name="Id">Core Audio endpoint ID.</param>
 /// <param name="IsDefault">Current Windows default output.</param>
 /// <param name="IsHeadphones">Headset / headphones form factor (picks the icon).</param>
-public sealed record OutputDeviceInfo(string Id, string Name, bool IsDefault, bool IsHeadphones);
+/// <param name="IsCommunications">Current Windows default communications output.</param>
+public sealed record OutputDeviceInfo(string Id, string Name, bool IsDefault, bool IsHeadphones, bool IsCommunications);
 
 /// <summary>Outcome of a volume / mute action, used for the activity log.</summary>
 /// <param name="IsPending">Nothing to change yet (the group's apps are not playing) — not an error.</param>
