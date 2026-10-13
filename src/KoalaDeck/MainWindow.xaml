@@ -1,0 +1,593 @@
+<Window x:Class="KoalaDeck.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:KoalaDeck.ViewModels"
+        xmlns:models="clr-namespace:KoalaDeck.Models"
+        xmlns:controls="clr-namespace:KoalaDeck.Controls"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance Type=vm:MainViewModel}"
+        Title="Koala Deck"
+        Width="1180" Height="920" MinWidth="1080" MinHeight="800"
+        WindowStartupLocation="CenterScreen"
+        Icon="pack://application:,,,/Assets/KoalaDeck.ico"
+        Background="{StaticResource BgBrush}"
+        Foreground="{StaticResource TextBrush}"
+        FontFamily="{StaticResource UiFont}"
+        FontSize="13"
+        UseLayoutRounding="True">
+
+    <Window.Resources>
+
+        <!-- ======================================================== COM port item -->
+        <DataTemplate x:Key="PortItemTemplate" DataType="{x:Type models:SerialPortInfo}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding PortName}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1" Text="{Binding Description}" Foreground="{StaticResource TextMutedBrush}"
+                           Margin="8,0,0,0" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                <Border Grid.Column="2" Margin="8,0,0,0" CornerRadius="5" Padding="6,1" VerticalAlignment="Center"
+                        Background="{StaticResource AccentSoftBrush}"
+                        Visibility="{Binding IsLikelyEsp32, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="ESP32" FontSize="10" FontWeight="Bold" Foreground="{StaticResource AccentBrush}" />
+                </Border>
+            </Grid>
+        </DataTemplate>
+
+        <!-- ======================================================== Output device item -->
+        <DataTemplate x:Key="OutputItemTemplate" DataType="{x:Type vm:OutputDeviceItem}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Path x:Name="DeviceIcon" Data="{StaticResource IconSpeaker}" Fill="{StaticResource TextMutedBrush}"
+                      Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center" />
+                <TextBlock x:Name="DeviceName" Grid.Column="1" Text="{Binding Name}" Margin="10,0,0,0"
+                           TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="2" Text="{Binding Detail}" Foreground="{StaticResource TextDimBrush}" FontSize="11"
+                           Margin="8,0,0,0" MaxWidth="130" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            </Grid>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsHeadphones}" Value="True">
+                    <Setter TargetName="DeviceIcon" Property="Data" Value="{StaticResource IconHeadset}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsFollowDefault}" Value="True">
+                    <Setter TargetName="DeviceIcon" Property="Data" Value="{StaticResource IconVolume}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsMissing}" Value="True">
+                    <Setter TargetName="DeviceName" Property="Foreground" Value="{StaticResource WarningBrush}" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <!-- ======================================================== App row (draggable) -->
+        <DataTemplate x:Key="AppRowTemplate" DataType="{x:Type vm:AppRowViewModel}">
+            <Border x:Name="Row" Height="46" CornerRadius="9" Padding="4,0,6,0" Margin="0,0,0,2" Background="Transparent"
+                    Cursor="Hand" ToolTip="{Binding ToolTipText}"
+                    PreviewMouseLeftButtonDown="AppRow_PreviewMouseLeftButtonDown" PreviewMouseMove="AppRow_PreviewMouseMove">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="12" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <Path x:Name="Grip" Data="{StaticResource IconGrip}" Fill="{StaticResource TextDimBrush}"
+                          Width="8" Height="14" Stretch="Uniform" Opacity="0" VerticalAlignment="Center" />
+
+                    <Border x:Name="IconTile" Grid.Column="1" Width="32" Height="32" CornerRadius="8" Margin="4,0,0,0"
+                            Background="{StaticResource Surface2Brush}">
+                        <Grid>
+                            <Path x:Name="FallbackIcon" Data="{StaticResource IconApp}" Fill="{StaticResource TextDimBrush}"
+                                  Width="16" Height="16" Stretch="Uniform" Visibility="Collapsed" />
+                            <Image x:Name="AppIcon" Source="{Binding Icon}" Width="22" Height="22"
+                                   RenderOptions.BitmapScalingMode="HighQuality" />
+                        </Grid>
+                    </Border>
+
+                    <StackPanel Grid.Column="2" Margin="10,0,8,0" VerticalAlignment="Center">
+                        <TextBlock x:Name="AppName" Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                        <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                            <Ellipse x:Name="StatusDot" Width="6" Height="6" Fill="{StaticResource TextDimBrush}" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding Status}" FontSize="11" Foreground="{StaticResource TextMutedBrush}" Margin="5,0,0,0" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <ProgressBar Grid.Column="3" Style="{StaticResource LevelMeter}" Width="46" Height="4" VerticalAlignment="Center"
+                                 Value="{Binding Level, Mode=OneWay}"
+                                 Foreground="{Binding DataContext.Accent, RelativeSource={RelativeSource AncestorType=ItemsControl}}" />
+
+                    <!-- Shown on hover, but kept in the layout and the accessibility tree (screen readers, UI Automation). -->
+                    <Button x:Name="RemoveButton" Grid.Column="4" Style="{StaticResource RowRemoveButton}" Margin="6,0,0,0"
+                            Opacity="0" IsHitTestVisible="False" ToolTip="Remove from this channel"
+                            AutomationProperties.Name="{Binding Name, StringFormat='Remove {0}'}"
+                            Command="{Binding DataContext.RemoveAppCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                            CommandParameter="{Binding Name}" />
+                </Grid>
+            </Border>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding Icon}" Value="{x:Null}">
+                    <Setter TargetName="FallbackIcon" Property="Visibility" Value="Visible" />
+                    <Setter TargetName="AppIcon" Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsRunning}" Value="False">
+                    <Setter TargetName="AppName" Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+                    <Setter TargetName="IconTile" Property="Opacity" Value="0.45" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsPlaying}" Value="True">
+                    <Setter TargetName="StatusDot" Property="Fill" Value="{StaticResource SuccessBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsMuted}" Value="True">
+                    <Setter TargetName="StatusDot" Property="Fill" Value="{StaticResource DangerBrush}" />
+                </DataTrigger>
+                <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
+                    <Setter TargetName="Row" Property="Background" Value="{StaticResource Surface2Brush}" />
+                    <Setter TargetName="Grip" Property="Opacity" Value="1" />
+                </Trigger>
+                <DataTrigger Binding="{Binding IsMember}" Value="False">
+                    <Setter TargetName="RemoveButton" Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsMember}" Value="True" />
+                        <Condition Binding="{Binding IsMouseOver, ElementName=Row}" Value="True" />
+                    </MultiDataTrigger.Conditions>
+                    <Setter TargetName="RemoveButton" Property="Opacity" Value="1" />
+                    <Setter TargetName="RemoveButton" Property="IsHitTestVisible" Value="True" />
+                </MultiDataTrigger>
+                <DataTrigger Binding="{Binding IsDragging}" Value="True">
+                    <Setter TargetName="Row" Property="Opacity" Value="0.35" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <!-- ======================================================== Channel card -->
+        <DataTemplate x:Key="ChannelCardTemplate" DataType="{x:Type vm:ChannelViewModel}">
+            <Border x:Name="Card" Style="{StaticResource Card}" Margin="8,0" Padding="18" AllowDrop="True"
+                    DragOver="Card_DragOver" Drop="Card_Drop">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="1.1*" MinHeight="96" MaxHeight="170" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" MinHeight="96" />
+                    </Grid.RowDefinitions>
+
+                    <!-- Header: icon, channel name, live state -->
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="40" Height="40" CornerRadius="12" Background="{Binding AccentSoft}">
+                            <Path Data="{Binding Icon}" Fill="{Binding Accent}" Width="19" Height="19" Stretch="Uniform" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding Badge}" Style="{StaticResource Caption}" />
+                            <TextBlock Text="{Binding Title}" FontFamily="{StaticResource DisplayFont}" FontSize="17" FontWeight="SemiBold" />
+                        </StackPanel>
+                        <Border Grid.Column="2" CornerRadius="10" Padding="9,4" VerticalAlignment="Center"
+                                Background="{StaticResource Surface2Brush}">
+                            <StackPanel Orientation="Horizontal">
+                                <Ellipse x:Name="StateDot" Width="7" Height="7" Fill="{StaticResource SuccessBrush}" VerticalAlignment="Center" />
+                                <TextBlock x:Name="StateText" Text="Live" Margin="6,0,0,0" FontSize="11" FontWeight="SemiBold"
+                                           Foreground="{StaticResource TextMutedBrush}" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <!-- Output device -->
+                    <ComboBox x:Name="OutputBox" Grid.Row="1" Margin="0,16,0,0"
+                              ItemsSource="{Binding OutputOptions}" SelectedItem="{Binding SelectedOutput}"
+                              ItemTemplate="{StaticResource OutputItemTemplate}" IsEnabled="{Binding CanChooseOutput}"
+                              ToolTip="Where the apps of this channel play"
+                              AutomationProperties.Name="{Binding Title, StringFormat='{}{0} output device'}" />
+
+                    <!-- Ring gauge: outer = volume, inner = live level -->
+                    <Viewbox Grid.Row="2" Margin="0,12,0,8" Stretch="Uniform">
+                        <Grid Width="200" Height="200">
+                            <controls:ArcGauge x:Name="Gauge" Value="{Binding Volume}" Peak="{Binding Level}"
+                                               ValueBrush="{Binding Accent}" PeakBrush="{Binding AccentPeak}"
+                                               TrackBrush="{StaticResource Surface3Brush}" Thickness="14" PeakThickness="5">
+                                <controls:ArcGauge.Effect>
+                                    <DropShadowEffect Color="{Binding AccentColor}" BlurRadius="22" ShadowDepth="0" Opacity="0.35" />
+                                </controls:ArcGauge.Effect>
+                            </controls:ArcGauge>
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,6,0,0">
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                    <TextBlock x:Name="VolumeLabel" Text="{Binding VolumeText}" FontFamily="{StaticResource DisplayFont}"
+                                               FontSize="44" FontWeight="Bold" />
+                                    <TextBlock x:Name="PercentLabel" Text="%" FontSize="18" FontWeight="SemiBold" Margin="2,0,0,9"
+                                               VerticalAlignment="Bottom" Foreground="{StaticResource TextMutedBrush}" />
+                                </StackPanel>
+                                <TextBlock x:Name="SubLabel" Text="VOLUME" Style="{StaticResource Caption}" HorizontalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+                    </Viewbox>
+
+                    <!-- Volume slider + mute -->
+                    <Grid Grid.Row="3">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Slider Style="{StaticResource DeckSlider}" Foreground="{Binding Accent}" VerticalAlignment="Center"
+                                Value="{Binding Volume, Mode=TwoWay}" IsEnabled="{Binding IsAvailable}"
+                                AutomationProperties.Name="{Binding Title, StringFormat='{}{0} volume'}"
+                                Thumb.DragStarted="VolumeSlider_DragStarted" Thumb.DragCompleted="VolumeSlider_DragCompleted" />
+                        <Button x:Name="MuteButton" Grid.Column="1" Style="{StaticResource IconButton}" Margin="14,0,0,0"
+                                Command="{Binding ToggleMuteCommand}" IsEnabled="{Binding IsAvailable}" ToolTip="Toggle mute"
+                                AutomationProperties.Name="{Binding Title, StringFormat='Mute {0}'}">
+                            <Path x:Name="MuteIcon" Data="{StaticResource IconVolume}" Fill="{StaticResource TextBrush}"
+                                  Width="16" Height="16" Stretch="Uniform" />
+                        </Button>
+                    </Grid>
+
+                    <!-- App list caption + add button -->
+                    <DockPanel Grid.Row="4" Margin="2,18,0,8">
+                        <controls:AddAppButton x:Name="AddApp" DockPanel.Dock="Right" ItemsSource="{Binding RunningApps}"
+                                               InstalledItemsSource="{Binding InstalledApps}"
+                                               OpeningCommand="{Binding AddAppOpeningCommand}"
+                                               Command="{Binding AddAppCommand}" />
+                        <TextBlock Text="{Binding AppsCaption}" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                        <Border CornerRadius="7" Padding="6,0" Margin="8,0,0,0" Background="{StaticResource Surface2Brush}"
+                                VerticalAlignment="Center" HorizontalAlignment="Left">
+                            <TextBlock Text="{Binding Apps.Count}" FontSize="10" FontWeight="Bold" Foreground="{StaticResource TextMutedBrush}" />
+                        </Border>
+                    </DockPanel>
+
+                    <!-- App list (drop zone) -->
+                    <Border x:Name="AppsArea" Grid.Row="5" CornerRadius="11" BorderThickness="1" Padding="4"
+                            Background="#08FFFFFF" BorderBrush="{StaticResource BorderBrush}">
+                        <Grid>
+                            <ItemsControl ItemsSource="{Binding Apps}" ItemTemplate="{StaticResource AppRowTemplate}" Focusable="False">
+                                <ItemsControl.Template>
+                                    <ControlTemplate TargetType="ItemsControl">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                            <ItemsPresenter />
+                                        </ScrollViewer>
+                                    </ControlTemplate>
+                                </ItemsControl.Template>
+                            </ItemsControl>
+                            <TextBlock x:Name="EmptyHint" Text="{Binding EmptyAppsHint}" Visibility="Collapsed" TextWrapping="Wrap"
+                                       TextAlignment="Center" Margin="16,0" FontSize="12" Foreground="{StaticResource TextDimBrush}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsMaster}" Value="True">
+                    <Setter TargetName="AddApp" Property="Visibility" Value="Collapsed" />
+                    <Setter TargetName="OutputBox" Property="ToolTip" Value="Windows default playback device" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Apps.Count}" Value="0">
+                    <Setter TargetName="EmptyHint" Property="Visibility" Value="Visible" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsAvailable}" Value="False">
+                    <Setter TargetName="StateDot" Property="Fill" Value="{StaticResource TextDimBrush}" />
+                    <Setter TargetName="StateText" Property="Text" Value="Idle" />
+                    <Setter TargetName="VolumeLabel" Property="Foreground" Value="{StaticResource TextDimBrush}" />
+                    <Setter TargetName="PercentLabel" Property="Visibility" Value="Collapsed" />
+                    <Setter TargetName="SubLabel" Property="Text" Value="NO AUDIO" />
+                    <Setter TargetName="Gauge" Property="Effect" Value="{x:Null}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsMuted}" Value="True">
+                    <Setter TargetName="StateDot" Property="Fill" Value="{StaticResource DangerBrush}" />
+                    <Setter TargetName="StateText" Property="Text" Value="Muted" />
+                    <Setter TargetName="Gauge" Property="ValueBrush" Value="{StaticResource TextDimBrush}" />
+                    <Setter TargetName="Gauge" Property="Effect" Value="{x:Null}" />
+                    <Setter TargetName="SubLabel" Property="Text" Value="MUTED" />
+                    <Setter TargetName="SubLabel" Property="Foreground" Value="{StaticResource DangerBrush}" />
+                    <Setter TargetName="MuteIcon" Property="Data" Value="{StaticResource IconVolumeOff}" />
+                    <Setter TargetName="MuteIcon" Property="Fill" Value="{StaticResource DangerBrush}" />
+                    <Setter TargetName="MuteButton" Property="Background" Value="{StaticResource DangerSoftBrush}" />
+                    <Setter TargetName="MuteButton" Property="BorderBrush" Value="{StaticResource DangerSoftBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsFlashing}" Value="True">
+                    <Setter TargetName="Card" Property="BorderBrush" Value="{Binding Accent}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsDropTarget}" Value="True">
+                    <Setter TargetName="Card" Property="BorderBrush" Value="{Binding Accent}" />
+                    <Setter TargetName="AppsArea" Property="BorderBrush" Value="{Binding Accent}" />
+                    <Setter TargetName="AppsArea" Property="Background" Value="{Binding AccentSoft}" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <!-- ======================================================== Microphone card -->
+        <DataTemplate x:Key="MicCardTemplate" DataType="{x:Type vm:MicViewModel}">
+            <Border x:Name="Card" Style="{StaticResource Card}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <DockPanel>
+                        <Border x:Name="Pill" DockPanel.Dock="Right" CornerRadius="10" Padding="9,3"
+                                Background="{StaticResource SuccessSoftBrush}">
+                            <TextBlock x:Name="PillText" Text="LIVE" FontSize="11" FontWeight="Bold" Foreground="{StaticResource SuccessBrush}" />
+                        </Border>
+                        <TextBlock Text="MICROPHONE" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                    </DockPanel>
+
+                    <Grid Grid.Row="1" Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="MicButton" Style="{StaticResource MicButton}" Margin="10,0,0,0" VerticalAlignment="Center"
+                                Background="{StaticResource SuccessBrush}" Foreground="{StaticResource SuccessBrush}"
+                                Command="{Binding ToggleCommand}" IsEnabled="{Binding IsAvailable}" ToolTip="Toggle microphone mute"
+                                AutomationProperties.Name="Toggle microphone mute">
+                            <Path x:Name="MicIcon" Data="{StaticResource IconMic}" Fill="{StaticResource SuccessBrush}"
+                                  Width="30" Height="30" Stretch="Uniform" />
+                        </Button>
+                        <StackPanel Grid.Column="1" Margin="26,0,0,0" VerticalAlignment="Center">
+                            <TextBlock x:Name="StateText" Text="Live" FontFamily="{StaticResource DisplayFont}" FontSize="26"
+                                       FontWeight="Bold" Foreground="{StaticResource SuccessBrush}" />
+                            <TextBlock Text="{Binding DeviceName}" Foreground="{StaticResource TextMutedBrush}" Margin="0,2,0,12"
+                                       TextTrimming="CharacterEllipsis" ToolTip="{Binding DeviceName}" />
+                            <ProgressBar x:Name="Meter" Style="{StaticResource LevelMeter}" Value="{Binding Level, Mode=OneWay}"
+                                         Foreground="{StaticResource SuccessBrush}" />
+                            <TextBlock Text="MIC_MUTE · MIC_UNMUTE" Style="{StaticResource Hint}" FontFamily="{StaticResource MonoFont}"
+                                       FontSize="11" Margin="0,10,0,0" />
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsMuted}" Value="True">
+                    <Setter TargetName="MicButton" Property="Background" Value="{StaticResource DangerBrush}" />
+                    <Setter TargetName="MicButton" Property="Foreground" Value="{StaticResource DangerBrush}" />
+                    <Setter TargetName="MicIcon" Property="Data" Value="{StaticResource IconMicOff}" />
+                    <Setter TargetName="MicIcon" Property="Fill" Value="{StaticResource DangerBrush}" />
+                    <Setter TargetName="StateText" Property="Text" Value="Muted" />
+                    <Setter TargetName="StateText" Property="Foreground" Value="{StaticResource DangerBrush}" />
+                    <Setter TargetName="Pill" Property="Background" Value="{StaticResource DangerSoftBrush}" />
+                    <Setter TargetName="PillText" Property="Text" Value="MUTED" />
+                    <Setter TargetName="PillText" Property="Foreground" Value="{StaticResource DangerBrush}" />
+                    <Setter TargetName="Meter" Property="Foreground" Value="{StaticResource DangerBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsAvailable}" Value="False">
+                    <Setter TargetName="MicButton" Property="Background" Value="{StaticResource TextDimBrush}" />
+                    <Setter TargetName="MicButton" Property="Foreground" Value="{StaticResource TextDimBrush}" />
+                    <Setter TargetName="MicIcon" Property="Fill" Value="{StaticResource TextDimBrush}" />
+                    <Setter TargetName="StateText" Property="Text" Value="No mic" />
+                    <Setter TargetName="StateText" Property="Foreground" Value="{StaticResource TextDimBrush}" />
+                    <Setter TargetName="Pill" Property="Background" Value="{StaticResource Surface2Brush}" />
+                    <Setter TargetName="PillText" Property="Text" Value="OFFLINE" />
+                    <Setter TargetName="PillText" Property="Foreground" Value="{StaticResource TextDimBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsFlashing}" Value="True">
+                    <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource TextMutedBrush}" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <!-- ======================================================== Activity row -->
+        <DataTemplate x:Key="ActivityItemTemplate" DataType="{x:Type vm:ActivityItem}">
+            <Grid Margin="0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70" />
+                    <ColumnDefinition Width="58" />
+                    <ColumnDefinition Width="150" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Time}" Foreground="{StaticResource TextDimBrush}" FontFamily="{StaticResource MonoFont}"
+                           FontSize="12" VerticalAlignment="Center" />
+                <Border x:Name="Chip" Grid.Column="1" Width="46" CornerRadius="6" Padding="0,2" HorizontalAlignment="Left"
+                        Background="{StaticResource Surface3Brush}">
+                    <TextBlock x:Name="ChipText" Text="{Binding Source}" FontSize="10" FontWeight="Bold" HorizontalAlignment="Center"
+                               Foreground="{StaticResource TextMutedBrush}" />
+                </Border>
+                <TextBlock Grid.Column="2" Text="{Binding Command}" FontFamily="{StaticResource MonoFont}" FontSize="12"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" />
+                <TextBlock x:Name="Message" Grid.Column="3" Text="{Binding Message}" Foreground="{StaticResource TextMutedBrush}"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Message}" />
+            </Grid>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding Source}" Value="ESP32">
+                    <Setter TargetName="Chip" Property="Background" Value="{StaticResource AccentSoftBrush}" />
+                    <Setter TargetName="ChipText" Property="Foreground" Value="{StaticResource AccentBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Source}" Value="SIM">
+                    <Setter TargetName="Chip" Property="Background" Value="{StaticResource SimulatorSoftBrush}" />
+                    <Setter TargetName="ChipText" Property="Foreground" Value="{StaticResource SimulatorBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="Success">
+                    <Setter TargetName="Message" Property="Foreground" Value="{StaticResource TextBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="Warning">
+                    <Setter TargetName="Message" Property="Foreground" Value="{StaticResource WarningBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="Error">
+                    <Setter TargetName="Message" Property="Foreground" Value="{StaticResource DangerBrush}" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <Style x:Key="PortPlaceholder" TargetType="TextBlock">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding SelectedPort}" Value="{x:Null}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="EmptyActivityHint" TargetType="TextBlock" BasedOn="{StaticResource Hint}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Activity.Count}" Value="0">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
+    <Grid x:Name="RootGrid" Margin="20,14,20,16" AllowDrop="True" Background="Transparent"
+          PreviewDragOver="Root_PreviewDragOver" DragOver="Root_DragOver">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" MinHeight="430" />
+            <RowDefinition Height="196" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- ==================================================== Header / connection bar -->
+        <Border Style="{StaticResource Card}" Padding="16,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Orientation="Horizontal">
+                    <Border Width="48" Height="48" CornerRadius="14" Background="{StaticResource LogoTileBrush}"
+                            BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                        <Image Source="{StaticResource KoalaLogo}" Width="36" Height="36" />
+                    </Border>
+                    <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                        <TextBlock Text="Koala Deck" FontFamily="{StaticResource DisplayFont}" FontSize="21" FontWeight="Bold" />
+                        <TextBlock Text="ESP32 USB Audio Controller" Foreground="{StaticResource TextMutedBrush}" FontSize="12" />
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Border Height="38" CornerRadius="19" Padding="14,0" Margin="0,0,12,0"
+                            Background="{StaticResource Surface2Brush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Ellipse Style="{StaticResource ConnectionDot}" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding ConnectionText}" FontWeight="SemiBold" Margin="10,0,0,0" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding ConnectionDetail}" Foreground="{StaticResource TextMutedBrush}" Margin="8,0,0,0"
+                                       MaxWidth="170" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                                       ToolTip="{Binding ConnectionDetail}" />
+                        </StackPanel>
+                    </Border>
+
+                    <Grid Width="250">
+                        <ComboBox ItemsSource="{Binding Ports}" SelectedItem="{Binding SelectedPort}"
+                                  ItemTemplate="{StaticResource PortItemTemplate}" ToolTip="COM port of your Koala Deck" />
+                        <TextBlock Text="Auto-detect ESP32" Style="{StaticResource PortPlaceholder}" IsHitTestVisible="False"
+                                   Margin="13,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource TextDimBrush}" />
+                    </Grid>
+                    <Button Style="{StaticResource IconButton}" Margin="8,0,0,0" Command="{Binding RefreshPortsCommand}"
+                            ToolTip="Rescan COM ports" AutomationProperties.Name="Refresh COM ports">
+                        <Path Data="{StaticResource IconRefresh}" Fill="{StaticResource TextBrush}" Width="16" Height="16" Stretch="Uniform" />
+                    </Button>
+                    <Button Style="{StaticResource ConnectButton}" Margin="8,0,0,0" MinWidth="128"
+                            Command="{Binding ToggleConnectionCommand}">
+                        <StackPanel Orientation="Horizontal">
+                            <Path Data="{StaticResource IconUsb}" Width="14" Height="14" Stretch="Uniform" Margin="0,0,8,0"
+                                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+                            <TextBlock Text="{Binding ConnectButtonText}" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ==================================================== Channels -->
+        <DockPanel Grid.Row="1" Margin="4,20,4,10">
+            <TextBlock Text="CHANNELS" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+            <TextBlock Text="Drag apps between channels · each channel can play on its own output" Style="{StaticResource Hint}"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+        </DockPanel>
+
+        <ItemsControl Grid.Row="2" Margin="-8,0" ItemsSource="{Binding Channels}" ItemTemplate="{StaticResource ChannelCardTemplate}"
+                      Focusable="False">
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <UniformGrid Columns="3" Rows="1" />
+                </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+        </ItemsControl>
+
+        <!-- ==================================================== Microphone + activity -->
+        <Grid Grid.Row="3" Margin="-8,16,-8,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <ContentControl Margin="8,0" Content="{Binding Mic}" ContentTemplate="{StaticResource MicCardTemplate}" Focusable="False" />
+
+            <Border Grid.Column="1" Grid.ColumnSpan="2" Style="{StaticResource Card}" Margin="8,0" Padding="20,16,12,12">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <DockPanel Margin="0,0,8,0">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <TextBox Style="{StaticResource DarkTextBox}" Width="190" FontFamily="{StaticResource MonoFont}" FontSize="12"
+                                     AutomationProperties.AutomationId="SimulateInput" AutomationProperties.Name="Simulated command"
+                                     Text="{Binding SimulateText, UpdateSourceTrigger=PropertyChanged}" Tag="e.g. VOL_UP_2"
+                                     ToolTip="Test a command without hardware (Enter to send)">
+                                <TextBox.InputBindings>
+                                    <KeyBinding Key="Return" Command="{Binding SimulateCommand}" />
+                                </TextBox.InputBindings>
+                            </TextBox>
+                            <Button Style="{StaticResource BaseButton}" Content="Simulate" Height="34" Margin="8,0,0,0"
+                                    AutomationProperties.AutomationId="SimulateButton" Command="{Binding SimulateCommand}" />
+                            <Button Style="{StaticResource GhostButton}" Content="Clear" Height="34" Margin="2,0,0,0"
+                                    Command="{Binding ClearActivityCommand}" />
+                        </StackPanel>
+                        <TextBlock Text="ACTIVITY" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                    </DockPanel>
+
+                    <Grid Grid.Row="1" Margin="0,10,0,0">
+                        <ItemsControl ItemsSource="{Binding Activity}" ItemTemplate="{StaticResource ActivityItemTemplate}">
+                            <ItemsControl.Template>
+                                <ControlTemplate TargetType="ItemsControl">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,8,0">
+                                        <ItemsPresenter />
+                                    </ScrollViewer>
+                                </ControlTemplate>
+                            </ItemsControl.Template>
+                        </ItemsControl>
+                        <TextBlock Text="Waiting for commands from your Koala Deck…" Style="{StaticResource EmptyActivityHint}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- ==================================================== Footer settings -->
+        <Grid Grid.Row="4" Margin="4,16,4,0">
+            <StackPanel Orientation="Horizontal">
+                <CheckBox Style="{StaticResource ToggleSwitch}" Content="Auto-connect" IsChecked="{Binding AutoConnect}"
+                          ToolTip="Connect on launch and find the ESP32 automatically when its COM port changes" />
+                <CheckBox Style="{StaticResource ToggleSwitch}" Content="Start with Windows" IsChecked="{Binding AutoStart}" Margin="28,0,0,0"
+                          ToolTip="Start minimized to the system tray when you sign in" />
+                <TextBlock Text="Volume step" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" Margin="28,0,10,0" />
+                <ComboBox Width="86" Height="32" ItemsSource="{Binding StepOptions}" SelectedItem="{Binding VolumeStep}"
+                          ItemStringFormat="{}{0} %" ToolTip="How much one encoder click changes the volume" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <TextBlock Text="Closing this window keeps Koala Deck running in the tray." Style="{StaticResource Hint}"
+                           VerticalAlignment="Center" />
+                <Button Style="{StaticResource GhostButton}" Content="Open logs" Height="32" Margin="10,0,0,0"
+                        Command="{Binding OpenLogsCommand}" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>
