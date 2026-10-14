@@ -15,7 +15,7 @@
     <Product>Koala Deck</Product>
     <AssemblyTitle>Koala Deck</AssemblyTitle>
     <Description>Companion app for the Koala Deck ESP32 USB audio controller</Description>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <!-- WFO0003 targets WinForms-first apps; this is a WPF app, which reads its DPI mode from app.manifest. -->
     <NoWarn>$(NoWarn);WFO0003</NoWarn>
