@@ -11,6 +11,7 @@ public partial class App : Application
     private SettingsService? _settings;
     private AudioService? _audio;
     private SerialService? _serial;
+    private DeckSync? _sync;
     private DeckController? _deck;
     private MainViewModel? _viewModel;
     private MainWindow? _window;
@@ -44,7 +45,8 @@ public partial class App : Application
             DtrEnable = settings.Current.DtrEnable,
             AutoDetect = settings.Current.AutoConnect,
         };
-        _deck = new DeckController(_serial, _audio, () => settings.Current.VolumeStepPercent);
+        _sync = new DeckSync(_serial, _audio);
+        _deck = new DeckController(_serial, _audio, _sync, () => settings.Current.VolumeStepPercent);
 
         MainViewModel viewModel = _viewModel = new MainViewModel(settings, _audio, _serial, _deck);
         _window = new MainWindow(viewModel);
@@ -114,6 +116,7 @@ public partial class App : Application
         TryRun(() => _window?.CloseForExit());
         TryRun(() => _viewModel?.Dispose());
         TryRun(() => _deck?.Dispose());
+        TryRun(() => _sync?.Dispose());
         TryRun(() => _serial?.Dispose());
         TryRun(() => _audio?.Dispose());
         TryRun(() => _tray?.Dispose());

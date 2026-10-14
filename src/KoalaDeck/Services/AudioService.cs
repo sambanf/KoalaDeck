@@ -48,8 +48,10 @@ public sealed class AudioService : IDisposable
     private bool _policyChecked;
     private List<SessionEntry> _sessions = new();
     private DateTime _lastRefreshUtc = DateTime.MinValue;
-    private bool _topologyDirty = true;
+    private volatile bool _topologyDirty = true; // also set by Windows notification threads
     private bool _reopenDevices;
+    private readonly SessionEvents _sessionEvents;
+    private DeviceNotifications? _deviceNotifications;
     private string? _lastRefreshError;
 
     public AudioService()
@@ -59,6 +61,7 @@ public sealed class AudioService : IDisposable
             _channelApps[i] = Array.Empty<string>();
         }
 
+        _sessionEvents = new SessionEvents(this);
         _worker = new Thread(WorkerLoop) { IsBackground = true, Name = "KoalaDeck audio" };
         _worker.SetApartmentState(ApartmentState.MTA);
         _worker.Start();
@@ -66,6 +69,13 @@ public sealed class AudioService : IDisposable
 
     /// <summary>False when this Windows version cannot route individual apps to a device (known after the first call).</summary>
     public bool IsAppRoutingSupported { get; private set; } = true;
+
+    /// <summary>
+    /// Windows reported that a volume or mute may have changed — an output or microphone endpoint, an app's session,
+    /// or a device being added, removed or made default; from Koala Deck or from anything else (mouse, volume keys).
+    /// Raised on Windows notification threads, often in bursts; read the new values with <see cref="GetDeckStateAsync"/>.
+    /// </summary>
+    public event EventHandler? StateChanged;
 
     // ------------------------------------------------------------------ public API
 
@@ -98,6 +108,10 @@ public sealed class AudioService : IDisposable
         InvokeAsync(() => SetMicrophoneMute(mute));
 
     public Task<AudioSnapshot> GetSnapshotAsync() => InvokeAsync(CreateSnapshot);
+
+    /// <summary>The values the deck shows: the three channels and the microphone, read from Windows now (no app list).</summary>
+    public Task<AudioSnapshot> GetDeckStateAsync() =>
+        InvokeAsync(() => new AudioSnapshot(SnapshotChannels(), SnapshotMicrophone(), Array.Empty<AppSnapshot>()));
 
     public void Dispose()
     {
@@ -221,6 +235,12 @@ public sealed class AudioService : IDisposable
     private void RefreshTopology()
     {
         _enumerator ??= new MMDeviceEnumerator();
+        if (_deviceNotifications is null)
+        {
+            _deviceNotifications = new DeviceNotifications(this);
+            _enumerator.RegisterEndpointNotificationCallback(_deviceNotifications);
+        }
+
         if (!_policyChecked)
         {
             _policyChecked = true; // COM is initialized on this thread now
@@ -280,9 +300,43 @@ public sealed class AudioService : IDisposable
                 _ => "microphone",
             };
             Logger.Info($"Default {kind}: {SafeFriendlyName(fresh)}");
+            Watch(fresh);
         }
 
         return fresh;
+    }
+
+    /// <summary>Raises <see cref="StateChanged"/> whenever this device's volume or mute changes, from anywhere.</summary>
+    private void Watch(MMDevice device)
+    {
+        try
+        {
+            device.AudioEndpointVolume.OnVolumeNotification += OnEndpointVolumeChanged;
+        }
+        catch (Exception ex) when (IsAudioFailure(ex))
+        {
+            // No volume control on this endpoint; the safety poll in DeckSync still covers it.
+        }
+    }
+
+    private void OnEndpointVolumeChanged(AudioVolumeNotificationData data) => RaiseStateChanged();
+
+    private void OnDevicesChanged()
+    {
+        _topologyDirty = true; // re-resolve defaults and sessions on the next call
+        RaiseStateChanged();
+    }
+
+    private void RaiseStateChanged()
+    {
+        try
+        {
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Audio StateChanged handler failed", ex);
+        }
     }
 
     /// <summary>Apps can play on any output (e.g. Discord on a headset), so sessions are collected from all active outputs.</summary>
@@ -310,6 +364,7 @@ public sealed class AudioService : IDisposable
             else
             {
                 _renderDevices[id] = device;
+                Watch(device); // channels playing on their own device show that device's volume
             }
         }
 
@@ -386,6 +441,7 @@ public sealed class AudioService : IDisposable
             }
 
             entry = new SessionEntry(control, pid, process.Name, process.ExecutablePath);
+            control.RegisterEventClient(_sessionEvents); // app volume / mute changed in the Volume mixer or by the app
             return true;
         }
         catch (Exception ex) when (IsAudioFailure(ex))
@@ -934,7 +990,9 @@ public sealed class AudioService : IDisposable
 
     // ------------------------------------------------------------------ snapshot (worker thread)
 
-    private AudioSnapshot CreateSnapshot()
+    private AudioSnapshot CreateSnapshot() => new(SnapshotChannels(), SnapshotMicrophone(), SnapshotApps());
+
+    private ChannelSnapshot[] SnapshotChannels()
     {
         var channels = new ChannelSnapshot[ChannelCount];
         channels[0] = SnapshotMaster();
@@ -943,7 +1001,7 @@ public sealed class AudioService : IDisposable
             channels[channel - 1] = SnapshotChannel(channel);
         }
 
-        return new AudioSnapshot(channels, SnapshotMicrophone(), SnapshotApps());
+        return channels;
     }
 
     private ChannelSnapshot SnapshotMaster() =>
@@ -1141,6 +1199,19 @@ public sealed class AudioService : IDisposable
     private void ReleaseAll()
     {
         ReleaseDevices();
+        if (_deviceNotifications is not null)
+        {
+            try
+            {
+                _enumerator?.UnregisterEndpointNotificationCallback(_deviceNotifications);
+            }
+            catch (Exception ex) when (IsAudioFailure(ex))
+            {
+            }
+
+            _deviceNotifications = null;
+        }
+
         SafeDispose(_enumerator);
         _policy?.Dispose();
         _enumerator = null;
@@ -1150,4 +1221,50 @@ public sealed class AudioService : IDisposable
     private sealed record SessionEntry(AudioSessionControl Control, uint ProcessId, string ProcessName, string? ExecutablePath);
 
     private sealed record ProcessIdentity(string Name, string? ExecutablePath);
+
+    /// <summary>
+    /// Session callbacks (Windows threads). Only signals: Core Audio must not be called back from inside a notification.
+    /// </summary>
+    private sealed class SessionEvents(AudioService owner) : IAudioSessionEventsHandler
+    {
+        public void OnVolumeChanged(float volume, bool isMuted) => owner.RaiseStateChanged();
+
+        public void OnSessionDisconnected(AudioSessionDisconnectReason disconnectReason) => owner.OnDevicesChanged();
+
+        public void OnDisplayNameChanged(string displayName)
+        {
+        }
+
+        public void OnIconPathChanged(string iconPath)
+        {
+        }
+
+        public void OnChannelVolumeChanged(uint channelCount, IntPtr newVolumes, uint channelIndex)
+        {
+        }
+
+        public void OnGroupingParamChanged(ref Guid groupingId)
+        {
+        }
+
+        public void OnStateChanged(AudioSessionState state)
+        {
+        }
+    }
+
+    /// <summary>Device added / removed / enabled / made default (Windows threads; only signals, see <see cref="SessionEvents"/>).</summary>
+    private sealed class DeviceNotifications(AudioService owner) : IMMNotificationClient
+    {
+        public void OnDeviceStateChanged(string deviceId, DeviceState newState) => owner.OnDevicesChanged();
+
+        public void OnDeviceAdded(string pwstrDeviceId) => owner.OnDevicesChanged();
+
+        public void OnDeviceRemoved(string deviceId) => owner.OnDevicesChanged();
+
+        public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId) => owner.OnDevicesChanged();
+
+        public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key)
+        {
+        }
+    }
 }

@@ -28,7 +28,7 @@ Drag & drop apps between channels:
 dotnet run --project src/KoalaDeck
 ```
 
-Unit tests (protocol parser, process name normalization, settings migration, Start menu shortcuts, ESP32 port detection):
+Unit tests (protocol parser, SYNC format, process name normalization, settings migration, Start menu shortcuts, ESP32 port detection):
 
 ```bash
 dotnet test
@@ -55,7 +55,11 @@ shows *"Windows protected your PC"* the first time (More info → Run anyway).
 The version comes from `<Version>` in `src/KoalaDeck/KoalaDeck.csproj`. The two publish profiles are in
 `src/KoalaDeck/Properties/PublishProfiles/` (`portable`, `installer`).
 
-## Serial Protocol (ESP32 → PC)
+## Serial Protocol
+
+The link is two-way, 115200 baud, one message per line.
+
+### ESP32 → PC (commands)
 
 One command per line, ending with `\n` (or `\r\n`), case-insensitive.
 
@@ -68,19 +72,83 @@ One command per line, ending with `\n` (or `\r\n`), case-insensitive.
 | `VOL_UP_3` / `VOL_DOWN_3` | Music channel volume ±step (no default apps) |
 | `MUTE_TOGGLE_3` | Toggle Music mute |
 | `MIC_MUTE` / `MIC_UNMUTE` | Mute / unmute default recording device |
-| `MIC_TOGGLE` | *(additional)* toggle microphone mute — handy for a single button |
-
-Example on the ESP32 side (Arduino):
-
-```cpp
-void setup() { Serial.begin(115200); }
-// encoder turned clockwise:
-Serial.println("VOL_UP_2");
-```
+| `MIC_TOGGLE` | Toggle microphone mute — handy for a single button |
+| `GET_SYNC` | Ask for the current state; the PC answers with a `SYNC:` line (send it when the ESP32 boots or reconnects) |
 
 Other lines (e.g., ESP32 boot logs) are ignored and only appear in the **Activity** panel.
 `VOL_UP_*` also unmutes the channel, similar to the Windows volume buttons.
 What a channel's volume changes — its output device or its apps — is described under *Output device per channel*.
+
+### PC → ESP32 (state sync)
+
+The PC sends the real Windows state so the deck's display (e.g. an OLED) always matches Windows exactly — including
+values that are not a multiple of the step, such as 12 % or 17 %:
+
+```text
+SYNC:vol1,vol2,vol3,mute1,mute2,mute3,micMute\n
+```
+
+| Field | Values |
+|---|---|
+| `vol1`, `vol2`, `vol3` | `0`–`100`: Master, Chat, Music volume as Windows shows it (rounded like the Windows volume flyout) |
+| `mute1`, `mute2`, `mute3` | `0` = unmuted, `1` = muted |
+| `micMute` | `0` = microphone live, `1` = muted |
+
+Example: `SYNC:12,50,80,0,0,0,1` — Master 12 %, Chat 50 %, Music 80 %, nothing muted, microphone muted.
+
+A `SYNC:` line is sent:
+
+| When | Sent even if nothing changed? |
+|---|---|
+| After **every command** from the ESP32 (also when it changed nothing, e.g. `VOL_UP_1` at 100 %, or failed) | yes |
+| When the ESP32 sends `GET_SYNC` | yes |
+| When the serial link connects | yes |
+| When **Windows reports a change** made anywhere else: mouse, volume keys, Volume mixer, another app, the dashboard, a device unplugged or a new default device | only if a value changed |
+| Every second as a safety net while connected | only if a value changed |
+
+Notes:
+
+- Values are always read back from Windows after a change, never computed from the step.
+- Chat and Music report the volume their knob controls: the output device's volume when the channel plays on its own
+  device, otherwise the apps' volume (see *Output device per channel*). A channel whose apps are all closed keeps
+  reporting its last known values.
+- Bursts of Windows notifications (dragging a slider) are merged: at most about 25 lines per second.
+
+Example on the ESP32 side (Arduino):
+
+```cpp
+int volume[3];
+bool muted[3];
+bool micMuted;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("GET_SYNC");          // ask the PC for the current state
+}
+
+void loop() {
+  // encoder turned clockwise:   Serial.println("VOL_UP_2");
+
+  static String line;
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      int v1, v2, v3, m1, m2, m3, mic;
+      if (sscanf(line.c_str(), "SYNC:%d,%d,%d,%d,%d,%d,%d", &v1, &v2, &v3, &m1, &m2, &m3, &mic) == 7) {
+        volume[0] = v1; volume[1] = v2; volume[2] = v3;
+        muted[0] = m1;  muted[1] = m2;  muted[2] = m3;
+        micMuted = mic;
+        // redraw the OLED here
+      }
+      line = "";
+    } else if (c != '\r') {
+      line += c;
+    }
+  }
+}
+```
+
+The **Simulator** box in the Activity panel accepts `GET_SYNC` too: it shows the `SYNC:` line the ESP32 would receive.
 
 ## Features
 
@@ -123,6 +191,8 @@ What a channel's volume changes — its output device or its apps — is describ
 - **System Tray** — the X button hides the window to the tray. Tray menu: *Open Dashboard*, *Auto-start on Windows Boot*,
   *Reconnect Serial*, *Exit*. Tray icon colors: green (connected), yellow (searching), red (disconnected).
 - **Start with Windows** — `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` with the `--minimized` argument (straight to tray).
+- **Two-way sync** — the deck gets the real Windows volumes and mutes (`SYNC:` lines) after each of its commands, on
+  `GET_SYNC`, and whenever Windows reports a change made elsewhere (see *Serial Protocol*).
 - **Single instance** — opening the app a second time brings the already running dashboard to the front.
 - **Simulator** — type commands in the Activity panel (e.g., `VOL_UP_2`) to test without hardware.
 
@@ -157,6 +227,7 @@ KoalaDeck.sln
 │  │  ├─ SerialService.cs         Port scanner, connect/disconnect, reader thread, reconnect watchdog
 │  │  ├─ CommandParser.cs         Text protocol parser
 │  │  ├─ DeckController.cs        Serial → Audio, command routing, Activity events
+│  │  ├─ DeckSync.cs              Audio → Serial: SYNC: lines with the real Windows state
 │  │  ├─ TrayIconService.cs       NotifyIcon + dark context menu
 │  │  ├─ KoalaArt.cs              Render tray icon + status dots (GDI+)
 │  │  ├─ SettingsService.cs       %AppData%\KoalaDeck\settings.json
@@ -181,9 +252,14 @@ KoalaDeck.sln
   If a call fails (device unplugged, default device changed, app closed its session, or a device interface that went bad
   after sleep/resume or a driver reset), the service re-opens every audio device and retries once. Default devices are
   logged whenever they change.
+- **Audio notifications:** Windows reports volume / mute changes of output and microphone endpoints
+  (`IAudioEndpointVolumeCallback`), of each app's session (`IAudioSessionEvents`) and device changes
+  (`IMMNotificationClient`). These callbacks arrive on Windows threads and only signal; `DeckSync` then reads the new
+  values through the audio thread.
 - **Serial:** reading occurs on a background thread with a timeout; `IOException`/`UnauthorizedAccessException` are caught and
-  passed to the watchdog. The port stream is explicitly closed (with `GC.SuppressFinalize`) to prevent known .NET finalizer crashes
-  when a USB adapter is removed.
+  passed to the watchdog. Writing is queued: callers never wait on the port, a writer task sends the lines in order
+  (bounded by a 500 ms write timeout), and only the newest lines are kept if the device stops reading. The port stream is
+  explicitly closed (with `GC.SuppressFinalize`) to prevent known .NET finalizer crashes when a USB adapter is removed.
 - **UI:** events from other threads are marshaled via `Dispatcher.InvokeAsync`. Live meters are only polled (20 fps) when the dashboard
   is visible; while in the tray, the app is practically idle.
 - `DispatcherUnhandledException`, `AppDomain.UnhandledException`, and `TaskScheduler.UnobservedTaskException` are logged.
@@ -220,4 +296,7 @@ Older settings are migrated automatically: `Channel2Target` / `Channel3Target` b
   volume slider works for that device; HDMI/DisplayPort monitor audio and USB headsets can refuse while asleep or
   reconnecting.
 - **ESP32-S3 not sending data** — set `"DtrEnable": true` in `settings.json`.
+- **Deck display does not follow Windows** — the firmware must read the serial port and parse `SYNC:` lines (see the
+  Arduino example). Type `GET_SYNC` in the Simulator box to see what the PC sends. *"Serial write timed out"* in the log
+  means the board stopped reading its serial input.
 - Logs are located at `%LocalAppData%\KoalaDeck\koaladeck.log` (*Open logs* button in the footer).

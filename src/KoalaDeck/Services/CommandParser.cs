@@ -5,7 +5,8 @@ namespace KoalaDeck.Services;
 
 /// <summary>
 /// Parses the ESP32 text protocol (one command per line, case-insensitive):
-/// <c>VOL_UP_n</c>, <c>VOL_DOWN_n</c>, <c>MUTE_TOGGLE_n</c> (n = 1..3), <c>MIC_MUTE</c>, <c>MIC_UNMUTE</c>, <c>MIC_TOGGLE</c>.
+/// <c>VOL_UP_n</c>, <c>VOL_DOWN_n</c>, <c>MUTE_TOGGLE_n</c> (n = 1..3), <c>MIC_MUTE</c>, <c>MIC_UNMUTE</c>, <c>MIC_TOGGLE</c>,
+/// <c>GET_SYNC</c>. The reply direction (<c>SYNC:...</c>) is built by <see cref="DeckSync"/>.
 /// </summary>
 public static class CommandParser
 {
@@ -30,6 +31,9 @@ public static class CommandParser
                 return true;
             case "MIC_TOGGLE":
                 command = new DeckCommand(DeckAction.MicToggle, 0);
+                return true;
+            case "GET_SYNC":
+                command = new DeckCommand(DeckAction.GetSync, -1);
                 return true;
         }
 

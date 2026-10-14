@@ -18,6 +18,7 @@ public class CommandParserTests
     [InlineData("MIC_MUTE", DeckAction.MicMute, 0)]
     [InlineData("MIC_UNMUTE", DeckAction.MicUnmute, 0)]
     [InlineData("MIC_TOGGLE", DeckAction.MicToggle, 0)]
+    [InlineData("GET_SYNC", DeckAction.GetSync, -1)]
     public void Parses_every_protocol_command(string line, DeckAction action, int channel)
     {
         Assert.True(CommandParser.TryParse(line, out DeckCommand command));

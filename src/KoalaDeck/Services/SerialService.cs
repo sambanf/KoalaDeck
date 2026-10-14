@@ -4,6 +4,7 @@ using System.Management;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.Channels;
 using KoalaDeck.Models;
 
 namespace KoalaDeck.Services;
@@ -44,6 +45,8 @@ public sealed partial class SerialService : IDisposable
     private SerialPort? _port;
     private Stream? _stream;
     private Thread? _reader;
+    private Channel<string>? _outbox;
+    private bool _writeTimeoutLogged;
     private int _session;
     private int _faultedSession = -1;
     private string? _faultReason;
@@ -56,7 +59,7 @@ public sealed partial class SerialService : IDisposable
     private string? _lastOpenError;
     private Dictionary<string, SerialPortInfo> _portInfo = new(StringComparer.OrdinalIgnoreCase);
 
-    private SerialConnectionState _state = SerialConnectionState.Disconnected;
+    private volatile SerialConnectionState _state = SerialConnectionState.Disconnected; // read from any thread
     private string? _statePort;
     private string? _stateMessage;
 
@@ -90,6 +93,8 @@ public sealed partial class SerialService : IDisposable
     public string? ConnectedPort { get; private set; }
 
     public SerialConnectionState State => _state;
+
+    public bool IsConnected => _state == SerialConnectionState.Connected;
 
     // ------------------------------------------------------------------ public API
 
@@ -149,6 +154,12 @@ public sealed partial class SerialService : IDisposable
 
         KickWatchdog();
     }
+
+    /// <summary>
+    /// Queues a line (e.g. "SYNC:...\n") for the device. Never blocks; returns false when not connected.
+    /// Thread-safe: lines from different threads are written whole, in queue order.
+    /// </summary>
+    public bool TrySend(string line) => Volatile.Read(ref _outbox)?.Writer.TryWrite(line) == true;
 
     /// <summary>Lists COM ports with friendly names and USB IDs. Uses WMI, so call it off the UI thread.</summary>
     public IReadOnlyList<SerialPortInfo> ScanPorts()
@@ -335,6 +346,16 @@ public sealed partial class SerialService : IDisposable
             _reader = new Thread(() => ReadLoop(stream, session)) { IsBackground = true, Name = $"KoalaDeck serial {portName}" };
             _reader.Start();
 
+            // Outgoing lines (SYNC:...) are queued and written by their own task, so callers never wait on the port.
+            // The queue keeps only the newest lines: they describe state, so an older one is never worth more.
+            Channel<string> outbox = Channel.CreateBounded<string>(new BoundedChannelOptions(16)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest,
+                SingleReader = true,
+            });
+            Volatile.Write(ref _outbox, outbox);
+            _ = Task.Run(() => WriteLoopAsync(stream, outbox.Reader, session));
+
             Logger.Info($"Serial connected: {portName} @ {BaudRate} baud, DTR {(port.DtrEnable ? "on" : "off")}");
             SetState(SerialConnectionState.Connected, portName, $"{portName} · {BaudRate} baud");
         }
@@ -356,7 +377,8 @@ public sealed partial class SerialService : IDisposable
 
     private void ClosePort()
     {
-        Interlocked.Increment(ref _session); // tells the reader loop to stop
+        Interlocked.Increment(ref _session); // tells the reader and writer loops to stop
+        Interlocked.Exchange(ref _outbox, null)?.Writer.TryComplete();
         SerialPort? port = _port;
         Stream? stream = _stream;
         Thread? reader = _reader;
@@ -472,6 +494,54 @@ public sealed partial class SerialService : IDisposable
                     line.Append((char)value); // drop non-printable bytes (boot-ROM noise at the wrong baud rate)
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ writer task
+
+    private async Task WriteLoopAsync(Stream stream, ChannelReader<string> outbox, int session)
+    {
+        try
+        {
+            await foreach (string line in outbox.ReadAllAsync())
+            {
+                if (Volatile.Read(ref _session) != session)
+                {
+                    return;
+                }
+
+                byte[] bytes = Encoding.ASCII.GetBytes(line);
+                try
+                {
+                    stream.Write(bytes, 0, bytes.Length); // bounded by WriteTimeout (500 ms)
+                    _writeTimeoutLogged = false;
+                }
+                catch (TimeoutException)
+                {
+                    // The device is not reading (e.g. busy or halted). Drop this line; the next state update follows.
+                    if (!_writeTimeoutLogged)
+                    {
+                        _writeTimeoutLogged = true;
+                        Logger.Warn("Serial write timed out; the device is not reading");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (Volatile.Read(ref _session) == session)
+                    {
+                        // Same handling as a failed read: the watchdog closes the port and reconnects.
+                        _faultReason = ex.Message;
+                        Volatile.Write(ref _faultedSession, session);
+                        KickWatchdog();
+                    }
+
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Serial writer stopped", ex);
         }
     }
 

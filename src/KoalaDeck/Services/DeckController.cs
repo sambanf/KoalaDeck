@@ -3,17 +3,22 @@ using KoalaDeck.Models;
 
 namespace KoalaDeck.Services;
 
-/// <summary>Glue between the serial protocol and the audio engine: parses incoming lines and executes them.</summary>
+/// <summary>
+/// Glue between the serial protocol and the audio engine: parses incoming lines, executes them and, for commands from
+/// the deck, answers with the real Windows state (<see cref="DeckSync"/>) so the deck's display never drifts.
+/// </summary>
 public sealed class DeckController : IDisposable
 {
     private readonly SerialService _serial;
     private readonly AudioService _audio;
+    private readonly DeckSync _sync;
     private readonly Func<int> _volumeStepPercent;
 
-    public DeckController(SerialService serial, AudioService audio, Func<int> volumeStepPercent)
+    public DeckController(SerialService serial, AudioService audio, DeckSync sync, Func<int> volumeStepPercent)
     {
         _serial = serial;
         _audio = audio;
+        _sync = sync;
         _volumeStepPercent = volumeStepPercent;
         _serial.LineReceived += OnLineReceived;
     }
@@ -24,6 +29,11 @@ public sealed class DeckController : IDisposable
     /// <summary>Executes a command. Commands are queued in arrival order on the audio thread.</summary>
     public async Task<AudioActionResult?> ExecuteAsync(DeckCommand command, ActivitySource source)
     {
+        if (command.Action == DeckAction.GetSync)
+        {
+            return await ReplyToGetSyncAsync(command, source);
+        }
+
         try
         {
             int step = Math.Clamp(_volumeStepPercent(), 1, 50);
@@ -62,11 +72,30 @@ public sealed class DeckController : IDisposable
             Raise(source, command, $"Failed: {ex.Message}", ActivityKind.Error);
             return null;
         }
+        finally
+        {
+            if (source == ActivitySource.Device)
+            {
+                // Always answer the deck with what Windows really did — also when nothing changed (already at 100 %)
+                // or the command failed — so its display snaps back to the true value.
+                await _sync.SendAsync(force: true);
+            }
+        }
     }
 
     public void Dispose()
     {
         _serial.LineReceived -= OnLineReceived;
+    }
+
+    private async Task<AudioActionResult?> ReplyToGetSyncAsync(DeckCommand command, ActivitySource source)
+    {
+        string? line = await _sync.SendAsync(force: true);
+        string message = line is null ? "Could not read the audio state"
+            : _serial.IsConnected ? $"Sent {line}"
+            : $"{line} (not connected, nothing sent)";
+        Raise(source, command, message, line is null ? ActivityKind.Warning : ActivityKind.Info);
+        return line is null ? null : new AudioActionResult(true, "Deck", 0, false, message);
     }
 
     private void OnLineReceived(object? sender, string line)
